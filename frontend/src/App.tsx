@@ -40,11 +40,6 @@ export function App() {
     { name: 'Sunset Glow', color1: '#f59e0b', color2: '#f43f5e' },
   ];
 
-  // Load documents on initial mount
-  useEffect(() => {
-    loadDocuments();
-  }, []);
-
   const loadDocuments = async () => {
     try {
       const docs = await api.getDocuments();
@@ -56,6 +51,11 @@ export function App() {
       console.error('Error fetching documents:', e);
     }
   };
+
+  // Load documents on initial mount
+  useEffect(() => {
+    loadDocuments();
+  }, []);
 
   const handleAskQuestion = async (queryText?: string) => {
     const q = queryText || questionInput;

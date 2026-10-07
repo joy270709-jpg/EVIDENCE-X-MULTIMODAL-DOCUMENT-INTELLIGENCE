@@ -23,12 +23,16 @@ export interface SoftAuroraProps {
 }
 
 function hexToVec3(hex: string): [number, number, number] {
-  const h = hex.replace('#', '');
-  return [
-    parseInt(h.slice(0, 2), 16) / 255,
-    parseInt(h.slice(2, 4), 16) / 255,
-    parseInt(h.slice(4, 6), 16) / 255
-  ];
+  try {
+    const h = (hex || '#000000').replace('#', '');
+    return [
+      parseInt(h.slice(0, 2), 16) / 255 || 0,
+      parseInt(h.slice(2, 4), 16) / 255 || 0,
+      parseInt(h.slice(4, 6), 16) / 255 || 0
+    ];
+  } catch {
+    return [0.5, 0.5, 0.5];
+  }
 }
 
 const vertexShader = `
@@ -107,10 +111,10 @@ float perlin3D(float amplitude, float frequency, float px, float py, float pz) {
   float d100 = dot(g100, vec3(x - cx, y - fy, pz - fz));
   float d010 = dot(g010, vec3(x - fx, y - cy, pz - fz));
   float d110 = dot(g110, vec3(x - cx, y - cy, pz - fz));
-  float d001 = dot(g001, vec3(x - fx, y - fy, pz - fz));
-  float d101 = dot(g101, vec3(x - cx, y - fy, pz - fz));
-  float d011 = dot(g011, vec3(x - fx, y - cy, pz - fz));
-  float d111 = dot(g111, vec3(x - cx, y - cy, pz - fz));
+  float d001 = dot(g001, vec3(x - fx, y - fy, pz - cz));
+  float d101 = dot(g101, vec3(x - cx, y - fy, pz - cz));
+  float d011 = dot(g011, vec3(x - fx, y - cy, pz - cz));
+  float d111 = dot(g111, vec3(x - cx, y - cy, pz - cz));
 
   float sx = quinticSmooth(x - fx);
   float sy = quinticSmooth(y - fy);
@@ -208,20 +212,28 @@ export default function SoftAurora({
   useEffect(() => {
     if (!containerRef.current) return;
     const container = containerRef.current;
-    const renderer = new Renderer({ alpha: true, premultipliedAlpha: false });
-    const gl = renderer.gl;
-    gl.clearColor(0, 0, 0, 0);
+    let renderer: any = null;
+    let gl: any = null;
+    let program: any = null;
+    let isDisposed = false;
+    let animationFrameId: number | null = null;
 
-    let program: any;
     let currentMouse = [0.5, 0.5];
     let targetMouse = [0.5, 0.5];
 
     function handleMouseMove(e: MouseEvent) {
-      const rect = gl.canvas.getBoundingClientRect();
-      targetMouse = [
-        (e.clientX - rect.left) / rect.width,
-        1.0 - (e.clientY - rect.top) / rect.height
-      ];
+      if (!gl || !gl.canvas) return;
+      try {
+        const rect = gl.canvas.getBoundingClientRect();
+        if (rect && rect.width > 0 && rect.height > 0) {
+          targetMouse = [
+            (e.clientX - rect.left) / rect.width,
+            1.0 - (e.clientY - rect.top) / rect.height
+          ];
+        }
+      } catch {
+        // fallback
+      }
     }
 
     function handleMouseLeave() {
@@ -229,82 +241,118 @@ export default function SoftAurora({
     }
 
     function resize() {
-      if (!container) return;
-      const width = container.offsetWidth || window.innerWidth;
-      const height = container.offsetHeight || window.innerHeight;
-      renderer.setSize(width, height);
-      if (program && program.uniforms && program.uniforms.uResolution) {
-        program.uniforms.uResolution.value = [gl.canvas.width, gl.canvas.height, gl.canvas.width / gl.canvas.height];
+      if (!container || !renderer || !gl) return;
+      try {
+        const width = container.offsetWidth || window.innerWidth || 300;
+        const height = container.offsetHeight || window.innerHeight || 300;
+        renderer.setSize(width, height);
+        if (program && program.uniforms && program.uniforms.uResolution) {
+          program.uniforms.uResolution.value = [gl.canvas.width, gl.canvas.height, gl.canvas.width / (gl.canvas.height || 1)];
+        }
+      } catch {
+        // ignore resize error
       }
     }
-    window.addEventListener('resize', resize);
-    resize();
 
-    const geometry = new Triangle(gl);
-    program = new Program(gl, {
-      vertex: vertexShader,
-      fragment: fragmentShader,
-      uniforms: {
-        uTime: { value: 0 },
-        uResolution: { value: [gl.canvas.width, gl.canvas.height, gl.canvas.width / gl.canvas.height] },
-        uSpeed: { value: speed },
-        uScale: { value: scale },
-        uBrightness: { value: brightness },
-        uColor1: { value: hexToVec3(color1) },
-        uColor2: { value: hexToVec3(color2) },
-        uNoiseFreq: { value: noiseFrequency },
-        uNoiseAmp: { value: noiseAmplitude },
-        uBandHeight: { value: bandHeight },
-        uBandSpread: { value: bandSpread },
-        uOctaveDecay: { value: octaveDecay },
-        uLayerOffset: { value: layerOffset },
-        uColorSpeed: { value: colorSpeed },
-        uMouse: { value: new Float32Array([0.5, 0.5]) },
-        uMouseInfluence: { value: mouseInfluence },
-        uEnableMouse: { value: enableMouseInteraction },
-        uLightMode: { value: lightMode ? 1 : 0 }
+    try {
+      renderer = new Renderer({ alpha: true, premultipliedAlpha: false });
+      gl = renderer.gl;
+      if (!gl) {
+        console.warn('WebGL context unavailable for SoftAurora');
+        return;
       }
-    });
+      gl.clearColor(0, 0, 0, 0);
 
-    const mesh = new Mesh(gl, { geometry, program });
-    container.appendChild(gl.canvas);
+      window.addEventListener('resize', resize);
+      resize();
 
-    if (enableMouseInteraction) {
-      window.addEventListener('mousemove', handleMouseMove);
-      window.addEventListener('mouseleave', handleMouseLeave);
-    }
+      const geometry = new Triangle(gl);
+      program = new Program(gl, {
+        vertex: vertexShader,
+        fragment: fragmentShader,
+        uniforms: {
+          uTime: { value: 0 },
+          uResolution: { value: [gl.canvas.width, gl.canvas.height, gl.canvas.width / (gl.canvas.height || 1)] },
+          uSpeed: { value: speed },
+          uScale: { value: scale },
+          uBrightness: { value: brightness },
+          uColor1: { value: hexToVec3(color1) },
+          uColor2: { value: hexToVec3(color2) },
+          uNoiseFreq: { value: noiseFrequency },
+          uNoiseAmp: { value: noiseAmplitude },
+          uBandHeight: { value: bandHeight },
+          uBandSpread: { value: bandSpread },
+          uOctaveDecay: { value: octaveDecay },
+          uLayerOffset: { value: layerOffset },
+          uColorSpeed: { value: colorSpeed },
+          uMouse: { value: new Float32Array([0.5, 0.5]) },
+          uMouseInfluence: { value: mouseInfluence },
+          uEnableMouse: { value: enableMouseInteraction },
+          uLightMode: { value: lightMode ? 1 : 0 }
+        }
+      });
 
-    let animationFrameId: number;
-
-    function update(time: number) {
-      animationFrameId = requestAnimationFrame(update);
-      program.uniforms.uTime.value = time * 0.001;
+      const mesh = new Mesh(gl, { geometry, program });
+      container.appendChild(gl.canvas);
 
       if (enableMouseInteraction) {
-        currentMouse[0] += 0.05 * (targetMouse[0] - currentMouse[0]);
-        currentMouse[1] += 0.05 * (targetMouse[1] - currentMouse[1]);
-        program.uniforms.uMouse.value[0] = currentMouse[0];
-        program.uniforms.uMouse.value[1] = currentMouse[1];
-      } else {
-        program.uniforms.uMouse.value[0] = 0.5;
-        program.uniforms.uMouse.value[1] = 0.5;
+        window.addEventListener('mousemove', handleMouseMove);
+        window.addEventListener('mouseleave', handleMouseLeave);
       }
 
-      renderer.render({ scene: mesh });
+      function update(time: number) {
+        if (isDisposed) return;
+        animationFrameId = requestAnimationFrame(update);
+
+        try {
+          if (!gl || gl.isContextLost?.()) return;
+          program.uniforms.uTime.value = time * 0.001;
+
+          if (enableMouseInteraction) {
+            currentMouse[0] += 0.05 * (targetMouse[0] - currentMouse[0]);
+            currentMouse[1] += 0.05 * (targetMouse[1] - currentMouse[1]);
+            program.uniforms.uMouse.value[0] = currentMouse[0];
+            program.uniforms.uMouse.value[1] = currentMouse[1];
+          } else {
+            program.uniforms.uMouse.value[0] = 0.5;
+            program.uniforms.uMouse.value[1] = 0.5;
+          }
+
+          renderer.render({ scene: mesh });
+        } catch {
+          // ignore transient render frames
+        }
+      }
+
+      animationFrameId = requestAnimationFrame(update);
+    } catch (err) {
+      console.warn('SoftAurora WebGL initialization skipped:', err);
     }
-    animationFrameId = requestAnimationFrame(update);
 
     return () => {
-      cancelAnimationFrame(animationFrameId);
+      isDisposed = true;
+      if (animationFrameId !== null) {
+        cancelAnimationFrame(animationFrameId);
+      }
       window.removeEventListener('resize', resize);
       if (enableMouseInteraction) {
         window.removeEventListener('mousemove', handleMouseMove);
         window.removeEventListener('mouseleave', handleMouseLeave);
       }
-      if (container.contains(gl.canvas)) {
-        container.removeChild(gl.canvas);
+      if (gl && gl.canvas && container && container.contains(gl.canvas)) {
+        try {
+          container.removeChild(gl.canvas);
+        } catch {
+          // ignore
+        }
       }
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      try {
+        if (gl && !gl.isContextLost?.()) {
+          gl.getExtension('WEBGL_lose_context')?.loseContext();
+        }
+      } catch {
+        // ignore
+      }
     };
   }, [speed, scale, brightness, color1, color2, noiseFrequency, noiseAmplitude, bandHeight, bandSpread, octaveDecay, layerOffset, colorSpeed, enableMouseInteraction, mouseInfluence, lightMode]);
 
